@@ -12,64 +12,51 @@ from moviepy.editor import (
     CompositeAudioClip,
     concatenate_videoclips
 )
+from moviepy.video.VideoClip import ColorClip
 
 # =========================
-# 1. PATHS & ASSETS
+# 1. SYSTEM PROMPTS
+# =========================
+SYSTEM_PROMPTS = {
+    "Young Man": "Restless, fast-talking, loves Addis Ababa's lights, uses technology slang.",
+    "Old Man": "Calm, slow, loves the soil of the village, speaks in proverbs."
+}
+
+# =========================
+# 2. PATHS & ASSETS
 # =========================
 BASE_DIR = os.getcwd()
 FONT_PATH = os.path.join(BASE_DIR, "AbyssinicaSIL-Regular.ttf")
 
-CITY_BG = "city_bg.png"
-VILLAGE_BG = "village_bg.png"
-NARRATOR_BG = "narrator_bg.png"
+CITY_BG = os.path.join(BASE_DIR, "city_bg.png")
+VILLAGE_BG = os.path.join(BASE_DIR, "village_bg.png")
+NARRATOR_BG = os.path.join(BASE_DIR, "narrator_bg.png")
 
-YOUNG_FACE = "young_face.png"
-OLD_FACE = "old_face.png"
+YOUNG_FACE = os.path.join(BASE_DIR, "young_face.png")
+OLD_FACE = os.path.join(BASE_DIR, "old_face.png")
 
-TEMP_DIR = "temp"
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+# =========================
+# 3. VIDEO SETTINGS (VERTICAL 9:16)
+# =========================
 VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920
 
 # =========================
-# 2. VOICE PROFILES
+# 4. WAV2LIP (OPTIONAL)
 # =========================
-VOICE_PROFILES = {
-    "Narrator": {"lang": "am", "tld": "com"},
-    "Young Man": {"lang": "am", "tld": "com"},
-    "Old Man": {"lang": "am", "tld": "co.uk"},
-}
-
-# =========================
-# 3. HELPER FUNCTIONS
-# =========================
-def apply_shake(clip):
-    return clip.set_position(
-        lambda t: (
-            VIDEO_WIDTH // 4 + random.uniform(-10, 10),
-            VIDEO_HEIGHT // 2 - 250 + random.uniform(-10, 10)
-        )
-    )
-
-def generate_voice(text, character, idx):
-    profile = VOICE_PROFILES.get(character, VOICE_PROFILES["Narrator"])
-    audio_path = f"{TEMP_DIR}/{character}_{idx}.mp3"
-    gTTS(text=text, lang=profile["lang"], tld=profile["tld"]).save(audio_path)
-    return AudioFileClip(audio_path)
-
-def run_wav2lip(face_img, audio_clip_path, output_path):
-    if not os.path.exists("Wav2Lip/checkpoints/wav2lip_gan.pth"):
-        return None
+def run_wav2lip(face_path, audio_path, output_path):
     cmd = [
         "python",
         "Wav2Lip/inference.py",
         "--checkpoint_path",
         "Wav2Lip/checkpoints/wav2lip_gan.pth",
         "--face",
-        face_img,
+        face_path,
         "--audio",
-        audio_clip_path,
+        audio_path,
         "--outfile",
         output_path,
         "--nosmooth"
@@ -78,192 +65,156 @@ def run_wav2lip(face_img, audio_clip_path, output_path):
     return output_path
 
 # =========================
-# 4. BUILD EPISODE FUNCTION
+# 5. HELPERS
 # =========================
-def build_episode(episode_number, chapter_number, episode_title, scenes_data):
+def apply_shake(clip):
+    return clip.set_position(
+        lambda t: (
+            150 + random.uniform(-4, 4),
+            200 + random.uniform(-4, 4)
+        )
+    )
+
+def safe_image_clip(path, duration, resize_height):
+    """
+    Returns ImageClip if file exists, otherwise a solid color fallback
+    """
+    if os.path.exists(path):
+        return ImageClip(path).set_duration(duration).resize(height=resize_height)
+    else:
+        return ColorClip(size=(VIDEO_WIDTH, VIDEO_HEIGHT), color=(0,0,0)).set_duration(duration)
+
+# =========================
+# 6. BUILD EPISODE
+# =========================
+def build_episode(narrator_text, dialogue_scenes):
+    """
+    narrator_text: string
+    dialogue_scenes: list of (speaker, text) tuples
+    """
     scenes = []
 
-    for scene_idx, scene_data in enumerate(scenes_data):
-        # -------------------------
-        # Narrator intro
-        # -------------------------
-        narrator_text = scene_data.get("narrator", "")
-        if narrator_text:
-            narrator_audio = generate_voice(narrator_text, "Narrator", scene_idx)
-            narrator_bg = ImageClip(NARRATOR_BG).set_duration(narrator_audio.duration).resize(height=VIDEO_HEIGHT)
-            narrator_sub = TextClip(
-                narrator_text,
-                font=FONT_PATH,
-                fontsize=50,
-                color="white",
-                stroke_color="black",
-                stroke_width=3,
-                method="label"
-            ).set_position(("center", VIDEO_HEIGHT - 300)).set_duration(narrator_audio.duration)
-            narrator_scene = CompositeVideoClip([narrator_bg, narrator_sub]).set_audio(narrator_audio)
-            scenes.append(narrator_scene)
+    # ---- A. Narrator scene
+    narrator_audio_path = os.path.join(TEMP_DIR, "narrator.mp3")
+    gTTS(text=narrator_text, lang="am").save(narrator_audio_path)
+    narrator_audio = AudioFileClip(narrator_audio_path)
 
-        # -------------------------
-        # Character dialogues
-        # -------------------------
-        for i, (role, text) in enumerate(scene_data.get("dialogues", [])):
-            audio_clip = generate_voice(text, role, scene_idx*10 + i)
-            bg_img = CITY_BG if role == "Young Man" else VILLAGE_BG
-            bg_clip = ImageClip(bg_img).set_duration(audio_clip.duration).resize(height=VIDEO_HEIGHT)
+    narrator_bg = safe_image_clip(NARRATOR_BG, narrator_audio.duration, VIDEO_HEIGHT)
 
-            # Lip-sync
-            face_img = YOUNG_FACE if role == "Young Man" else OLD_FACE
-            lipsync_output = f"{TEMP_DIR}/{role}_{scene_idx}_{i}_lipsync.mp4"
-            if os.path.exists("Wav2Lip/checkpoints/wav2lip_gan.pth"):
-                try:
-                    run_wav2lip(face_img, audio_clip.filename, lipsync_output)
-                    char_clip = VideoFileClip(lipsync_output).set_duration(audio_clip.duration).resize(height=500)
-                except:
-                    char_clip = ImageClip(face_img).set_duration(audio_clip.duration).resize(height=500)
-            else:
-                char_clip = ImageClip(face_img).set_duration(audio_clip.duration).resize(height=500)
+    subtitle = (
+        TextClip(
+            narrator_text,
+            font=FONT_PATH,
+            fontsize=60,
+            color="yellow",
+            stroke_color="black",
+            stroke_width=2,
+            method="caption",
+            size=(VIDEO_WIDTH - 160, None)
+        )
+        .set_position("center")
+        .set_duration(narrator_audio.duration)
+    )
 
-            if role == "Young Man":
-                char_clip = apply_shake(char_clip)
-            else:
-                char_clip = char_clip.set_position((VIDEO_WIDTH * 3 // 4 - 250, VIDEO_HEIGHT // 2 - 250))
+    scene = CompositeVideoClip([narrator_bg, subtitle]).set_audio(narrator_audio)
+    scenes.append(scene)
 
-            subtitle = TextClip(
+    # ---- B. Dialogue scenes
+    for i, (speaker, text) in enumerate(dialogue_scenes):
+        audio_path = os.path.join(TEMP_DIR, f"voice_{i}.mp3")
+        gTTS(text=text, lang="am").save(audio_path)
+        audio_clip = AudioFileClip(audio_path)
+
+        bg_img = CITY_BG if speaker == "Young Man" else VILLAGE_BG
+        bg_clip = safe_image_clip(bg_img, audio_clip.duration, VIDEO_HEIGHT)
+
+        face_img = YOUNG_FACE if speaker == "Young Man" else OLD_FACE
+        char_clip = safe_image_clip(face_img, audio_clip.duration, 500)
+
+        if speaker == "Young Man":
+            char_clip = apply_shake(char_clip)
+        else:
+            char_clip = char_clip.set_position((600, 200))
+
+        subtitle = (
+            TextClip(
                 text,
                 font=FONT_PATH,
-                fontsize=50,
+                fontsize=52,
                 color="yellow",
                 stroke_color="black",
-                stroke_width=3,
-                method="label"
-            ).set_position(("center", VIDEO_HEIGHT - 300)).set_duration(audio_clip.duration)
+                stroke_width=2,
+                method="caption",
+                size=(VIDEO_WIDTH - 160, None)
+            )
+            .set_position("center")
+            .set_duration(audio_clip.duration)
+        )
 
-            scene_clip = CompositeVideoClip([bg_clip, char_clip, subtitle]).set_audio(audio_clip)
-            scenes.append(scene_clip)
+        scene = CompositeVideoClip([bg_clip, char_clip, subtitle]).set_audio(audio_clip)
+        scenes.append(scene)
 
-    # -------------------------
-    # Final Video
-    # -------------------------
+    # ---- C. Final video
     final_video = concatenate_videoclips(scenes, method="compose")
 
-    # Optional BGM
-    if os.path.exists("masinqo_bgm.mp3"):
-        bgm = AudioFileClip("masinqo_bgm.mp3").volumex(0.12).set_duration(final_video.duration)
-        final_video = final_video.set_audio(CompositeAudioClip([final_video.audio, bgm]))
+    # ---- D. Optional background radio music
+    radio_bgm_path = os.path.join(BASE_DIR, "radio_bgm.mp3")
+    if os.path.exists(radio_bgm_path):
+        bgm = (
+            AudioFileClip(radio_bgm_path)
+            .volumex(0.10)
+            .set_duration(final_video.duration)
+        )
+        final_audio = CompositeAudioClip([final_video.audio, bgm])
+        final_video = final_video.set_audio(final_audio)
 
-    output = f"episode_{episode_number:02d}_chapter_{chapter_number:02d}.mp4"
-    final_video.write_videofile(
-        output,
-        fps=24,
-        codec="libx264",
-        audio_codec="aac",
-        threads=4,
-        preset="ultrafast",
-        ffmpeg_params=["-pix_fmt", "yuv420p"]
-    )
+    # ---- E. Export
+    output = os.path.join(BASE_DIR, "final_production.mp4")
+    final_video.write_videofile(output, fps=24, codec="libx264", audio_codec="aac")
     return output
 
 # =========================
-# 5. STREAMLIT UI
+# 7. STREAMLIT UI
 # =========================
-st.set_page_config(page_title="AI Radio Drama 🇪🇹", layout="centered")
+st.set_page_config(page_title="AI Cartoon Studio 🇪🇹", layout="centered")
+st.markdown("<style>.stApp { background-color: #009B3A; color: white; }</style>", unsafe_allow_html=True)
+st.title("🇪🇹 AI Cartoon Studio — Manual Scenes")
 
-st.title("🇪🇹 Ethiopian AI Radio Drama")
-st.write("Old-style radio narration • Modern storytelling")
+# ---- Episode number
+episode_number = st.number_input("📻 Episode Number", min_value=1, step=1, value=1)
 
-st.subheader("📘 Episode Details")
-episode_number = st.number_input("Episode Number", min_value=1, step=1, value=1)
-chapter_number = st.number_input("Chapter Number", min_value=1, step=1, value=1)
-episode_title = st.text_input("Episode Title", "The Road Between City and Soil")
+# ---- Narrator text
+narrator_text = st.text_area("Narrator Text", "Welcome to Ethiopian Radio Story Episode 1")
 
-# -------------------------
-# Session state for dynamic scenes
-# -------------------------
+# ---- Session state for manual dialogue scenes
 if "scenes" not in st.session_state:
     st.session_state.scenes = []
 
-# -------------------------
-# Add a new scene
-# -------------------------
-st.subheader("➕ Add a New Scene")
-with st.form(key=f"scene_form_{len(st.session_state.scenes)}"):
-    narrator_text = st.text_area("Narrator text", key=f"narrator_{len(st.session_state.scenes)}")
-    dialogues = []
-    num_dialogues = st.number_input(
-        "Number of dialogues in this scene", min_value=1, max_value=5, step=1, key=f"num_dialogues_{len(st.session_state.scenes)}"
-    )
-    for i in range(num_dialogues):
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            role = st.selectbox("Character", ["Young Man", "Old Man"], key=f"role_{len(st.session_state.scenes)}_{i}")
-        with col2:
-            text = st.text_input("Dialogue text", key=f"text_{len(st.session_state.scenes)}_{i}")
-        dialogues.append((role, text))
-    submitted = st.form_submit_button("Add Scene")
-    if submitted:
-        st.session_state.scenes.append({
-            "narrator": narrator_text,
-            "dialogues": dialogues
-        })
-        st.success(f"Scene {len(st.session_state.scenes)} added!")
+# ---- Add dialogue scene
+st.subheader("📝 Add Dialogue Scene")
+speaker = st.text_input("Speaker Name", key="speaker_input")
+dialogue = st.text_input("Dialogue Text", key="dialogue_input")
 
-# -------------------------
-# Display & manage scenes
-# -------------------------
+if st.button("➕ Add Scene"):
+    if speaker and dialogue:
+        st.session_state.scenes.append((speaker, dialogue))
+        st.success(f"Scene added: {speaker} → {dialogue}")
+        st.session_state.speaker_input = ""
+        st.session_state.dialogue_input = ""
+
+# ---- Show all added scenes
 if st.session_state.scenes:
-    st.subheader("📝 Current Scenes (Editable & Reorderable)")
+    st.subheader("🎬 Current Episode Scenes")
+    for i, (spk, txt) in enumerate(st.session_state.scenes, 1):
+        st.write(f"{i}. {spk}: {txt}")
 
-    for idx, scene in enumerate(st.session_state.scenes):
-        st.markdown(f"### Scene {idx+1}")
-        # Narrator edit
-        scene['narrator'] = st.text_area(
-            "Narrator text",
-            value=scene['narrator'],
-            key=f"edit_narrator_{idx}"
-        )
-        # Dialogues edit
-        for i, (role, text) in enumerate(scene["dialogues"]):
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                new_role = st.selectbox(
-                    "Character",
-                    ["Young Man", "Old Man"],
-                    index=["Young Man","Old Man"].index(role),
-                    key=f"edit_role_{idx}_{i}"
-                )
-            with col2:
-                new_text = st.text_input(
-                    "Dialogue text",
-                    value=text,
-                    key=f"edit_text_{idx}_{i}"
-                )
-            scene["dialogues"][i] = (new_role, new_text)
-
-        # Move Up / Move Down / Delete
-        col_up, col_down, col_del = st.columns([1,1,1])
-        with col_up:
-            if st.button("⬆️ Move Up", key=f"moveup_{idx}") and idx > 0:
-                st.session_state.scenes[idx-1], st.session_state.scenes[idx] = st.session_state.scenes[idx], st.session_state.scenes[idx-1]
-                st.experimental_rerun()
-        with col_down:
-            if st.button("⬇️ Move Down", key=f"movedown_{idx}") and idx < len(st.session_state.scenes)-1:
-                st.session_state.scenes[idx+1], st.session_state.scenes[idx] = st.session_state.scenes[idx], st.session_state.scenes[idx+1]
-                st.experimental_rerun()
-        with col_del:
-            if st.button("❌ Delete Scene", key=f"delete_{idx}"):
-                st.session_state.scenes.pop(idx)
-                st.experimental_rerun()
-
-# -------------------------
-# Produce Episode
-# -------------------------
-if st.session_state.scenes:
-    if st.button("🎬 Produce Episode"):
-        with st.spinner("Rendering your AI radio episode..."):
-            video = build_episode(
-                episode_number,
-                chapter_number,
-                episode_title,
-                st.session_state.scenes
-            )
-            st.video(video)
+# ---- Produce episode button
+if st.button("🎬 Produce Episode", key="produce_button"):
+    if not st.session_state.scenes:
+        st.warning("Please add at least one dialogue scene!")
+    else:
+        with st.spinner("Producing radio episode..."):
+            full_narration = f"ይህ የኢትዮጵያ ሬዲዮ ታሪክ ክፍል {episode_number} ነው። {narrator_text}"
+            video_path = build_episode(full_narration, st.session_state.scenes)
+        st.success("Episode created successfully!")
+        st.video(video_path)
